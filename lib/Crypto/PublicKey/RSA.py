@@ -339,14 +339,83 @@ class RsaKey(object):
             randfunc = Random.get_random_bytes
 
         if format == 'OpenSSH':
-            e_bytes, n_bytes = [x.to_bytes() for x in (self._e, self._n)]
-            if bord(e_bytes[0]) & 0x80:
-                e_bytes = b'\x00' + e_bytes
-            if bord(n_bytes[0]) & 0x80:
-                n_bytes = b'\x00' + n_bytes
-            keyparts = [b'ssh-rsa', e_bytes, n_bytes]
-            keystring = b''.join([struct.pack(">I", len(kp)) + kp for kp in keyparts])
-            return b'ssh-rsa ' + binascii.b2a_base64(keystring)[:-1]
+            if self.has_private():
+
+                if passphrase:
+                    raise NotImplementedError("For OpenSSH private key format, only plaintext export is supported.")
+
+                e_bytes, n_bytes, d_bytes, u_bytes, p_bytes, q_bytes = [x.to_bytes() for x in (self._e, self._n, self._d, self._u, self._p, self._q)]
+
+                # TODO: optimize
+                if bord(n_bytes[0]) & 0x80:
+                    n_bytes = b'\x00' + n_bytes
+                if bord(e_bytes[0]) & 0x80:
+                    e_bytes = b'\x00' + e_bytes
+                if bord(d_bytes[0]) & 0x80:
+                    d_bytes = b'\x00' + d_bytes
+                if bord(u_bytes[0]) & 0x80:
+                    u_bytes = b'\x00' + u_bytes
+                if bord(p_bytes[0]) & 0x80:
+                    p_bytes = b'\x00' + p_bytes
+                if bord(q_bytes[0]) & 0x80:
+                    q_bytes = b'\x00' + q_bytes
+
+                keytype = b'ssh-rsa'
+
+                # comment
+                comment = b'testcomment1234' # TODO: check if we'd like to integrate it as an argument
+
+                # create header
+                ciphername = b'none'
+                kdfname = b'none'
+                kdf = b''
+                num_keys = int(1).to_bytes(4,'big')
+
+                headerparts = [ciphername, kdfname, kdf]
+                headerstring = b'openssh-key-v1\x00' + b''.join([struct.pack(">I", len(kp)) + kp for kp in headerparts]) + num_keys
+                
+
+                # pubkey block
+                pubkeyparts = [keytype, e_bytes, n_bytes]
+                pubkeystring = b''.join([struct.pack(">I", len(kp)) + kp for kp in pubkeyparts])
+                
+                # priv key block
+                # checkint is not actually used in plaintext keys but still populated with a rand
+                checkint = Random.get_random_bytes(4)
+                checkint = checkint + checkint # for plaintext keys, we just repeat the sequence
+                privkeyparts = [keytype, n_bytes, e_bytes, d_bytes, u_bytes, p_bytes, q_bytes, comment] # p and q swapped - TODO: check
+                privkeystring = checkint + b''.join([struct.pack(">I", len(kp)) + kp for kp in privkeyparts])
+
+                # create padding
+                privkeystring_length = int(len(privkeystring))
+                padding_length = (8 - privkeystring_length % 8) % 8
+                padding = b''.join([s.to_bytes(1,'big') for s in range(1,padding_length + 1)])
+                padded_privkeystring = privkeystring + padding
+
+                # merge header, pubkey and privkey blocks
+                common_keyparts = [pubkeystring, padded_privkeystring]
+                common_keystring = headerstring + b''.join([struct.pack(">I", len(kp)) + kp for kp in common_keyparts])
+
+                # base64 encode
+                # ssh-keygen uses a line width of 70, we want to replicate that:
+                key_type = 'OPENSSH PRIVATE KEY'
+                out = "-----BEGIN %s-----\n" % key_type
+                b64 = binascii.b2a_base64(common_keystring)
+                chunks = [tostr(b64[i : i+70]) for i in range(0, len(b64), 70)]
+                out += "\n".join(chunks)
+                out += "-----END %s-----\n" % key_type
+                out
+                
+                return out
+            else:
+                e_bytes, n_bytes = [x.to_bytes() for x in (self._e, self._n)]
+                if bord(e_bytes[0]) & 0x80:
+                    e_bytes = b'\x00' + e_bytes
+                if bord(n_bytes[0]) & 0x80:
+                    n_bytes = b'\x00' + n_bytes
+                keyparts = [b'ssh-rsa', e_bytes, n_bytes]
+                keystring = b''.join([struct.pack(">I", len(kp)) + kp for kp in keyparts])
+                return b'ssh-rsa ' + binascii.b2a_base64(keystring)[:-1]
 
         # DER format is always used, even in case of PEM, which simply
         # encodes it into BASE64.
